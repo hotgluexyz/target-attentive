@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import re
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
 from target_attentive.client import AttentiveSink
+
+_HAS_TZ = re.compile(r"(Z|[+-]\d{2}:?\d{2})$", re.IGNORECASE)
 
 
 def _scalar_properties(properties: Optional[dict]) -> dict:
@@ -19,6 +23,28 @@ def _scalar_properties(properties: Optional[dict]) -> dict:
             continue
         cleaned[str(key)] = value
     return cleaned
+
+
+def _normalize_occurred_at(value: Any) -> Optional[str]:
+    """Coerce timestamps to RFC 3339 with UTC offset (Attentive Custom Events API)."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    text = str(value).strip()
+    if not text:
+        return None
+    # Common pandas/Recharge form: "2026-09-10 15:34:36"
+    if " " in text and "T" not in text:
+        text = text.replace(" ", "T", 1)
+    if _HAS_TZ.search(text):
+        return text
+    # Assume UTC when no offset is present.
+    if text.endswith("Z") or text.endswith("z"):
+        return text
+    return f"{text}Z"
 
 
 def _build_user(record: dict) -> Optional[dict]:
@@ -97,7 +123,7 @@ class EventsSink(AttentiveSink):
         if external_event_id:
             payload["externalEventId"] = str(external_event_id)
 
-        occurred_at = record.get("occurredAt")
+        occurred_at = _normalize_occurred_at(record.get("occurredAt"))
         if occurred_at:
             payload["occurredAt"] = occurred_at
 
