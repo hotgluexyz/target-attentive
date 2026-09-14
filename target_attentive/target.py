@@ -22,6 +22,38 @@ class TargetAttentive(TargetHotglue):
             required=True,
             description="Attentive private app API key (Bearer token)",
         ),
+        th.Property(
+            "subscribe_profiles",
+            th.BooleanType,
+            default=True,
+            description=(
+                "If true (default), opt Profiles into an Attentive subscription before "
+                "writing custom attributes so they appear under Subscribers. "
+                "Requires subscriptions:write scope."
+            ),
+        ),
+        th.Property(
+            "sign_up_source_id",
+            th.StringType,
+            description=(
+                "Attentive API Sign-up Unit ID (Sign-up Units tab → ID column). "
+                "Falls back to the hardcoded Hotglue demo unit (1446033) when omitted."
+            ),
+        ),
+        th.Property(
+            "subscription_type",
+            th.StringType,
+            description="Optional MARKETING or TRANSACTIONAL passed with subscribe requests.",
+        ),
+        th.Property(
+            "single_opt_in",
+            th.BooleanType,
+            default=False,
+            description=(
+                "If true, skip the Reply-Y SMS confirmation when subscribing. "
+                "Must be approved by Attentive for the account; otherwise the API returns 400."
+            ),
+        ),
     ).to_dict()
 
     def get_sink_class(self, stream_name: str):

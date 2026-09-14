@@ -6,9 +6,15 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
+from singer_sdk.exceptions import FatalAPIError
+
 from target_attentive.client import AttentiveSink
 
 _HAS_TZ = re.compile(r"(Z|[+-]\d{2}:?\d{2})$", re.IGNORECASE)
+
+# Hotglue.io Attentive API Sign-up Unit (INTEGRATION). Used when tenant config
+# omits ``sign_up_source_id``.
+DEFAULT_SIGN_UP_SOURCE_ID = "1446033"
 
 
 def _scalar_properties(properties: Optional[dict]) -> dict:
@@ -59,11 +65,17 @@ def _build_user(record: dict) -> Optional[dict]:
 
 
 class ProfilesSink(AttentiveSink):
-    """Upsert custom attributes on an Attentive user (profile)."""
+    """Upsert custom attributes on an Attentive user (profile).
+
+    By default opts the user into an Attentive subscription first so they appear
+    under Subscribers. Uses config ``sign_up_source_id``, falling back to
+    ``DEFAULT_SIGN_UP_SOURCE_ID``.
+    """
 
     name = "Profiles"
     available_names = ["profiles", "profile", "customers", "contacts"]
     endpoint = "/attributes/custom"
+    subscribe_endpoint = "/subscriptions"
 
     def preprocess_record(self, record: dict, context: dict) -> dict:
         user = _build_user(record)
@@ -83,13 +95,64 @@ class ProfilesSink(AttentiveSink):
 
         return {"user": user, "properties": properties}
 
+    def _subscribe_enabled(self) -> bool:
+        # Default on so exported profiles show under Attentive Subscribers.
+        return bool(self.config.get("subscribe_profiles", True))
+
+    def _resolve_sign_up_source_id(self) -> str:
+        configured = self.config.get("sign_up_source_id")
+        if configured is not None and str(configured).strip():
+            return str(configured).strip()
+        return DEFAULT_SIGN_UP_SOURCE_ID
+
+    def _build_subscribe_payload(self, user: dict) -> dict:
+        """Build POST /subscriptions body with signUpSourceId.
+
+        See https://docs.attentive.com/reference/addsubscriptions
+        """
+        payload: Dict[str, Any] = {
+            "user": user,
+            "signUpSourceId": self._resolve_sign_up_source_id(),
+        }
+
+        subscription_type = self.config.get("subscription_type")
+        if subscription_type:
+            subscription_type = str(subscription_type).upper()
+            if subscription_type not in ("MARKETING", "TRANSACTIONAL"):
+                raise FatalAPIError(
+                    f"Invalid subscription_type {subscription_type!r}; "
+                    "expected MARKETING or TRANSACTIONAL."
+                )
+            payload["subscriptionType"] = subscription_type
+
+        if self.config.get("single_opt_in"):
+            payload["singleOptIn"] = True
+
+        return payload
+
+    def _ensure_subscribed(self, user: dict) -> None:
+        """Opt the user in so they show up under Attentive Subscribers."""
+        if not self._subscribe_enabled():
+            return
+
+        payload = self._build_subscribe_payload(user)
+        self.logger.info(
+            "Subscribing Attentive user before attributes: %s (signUpSourceId=%s)",
+            user.get("email") or user.get("phone"),
+            payload.get("signUpSourceId"),
+        )
+        # Attentive returns 202 Accepted for new subscriptions.
+        self.request_api("POST", endpoint=self.subscribe_endpoint, request_data=payload)
+
     def upsert_record(self, record: dict, context: dict) -> Tuple[Any, bool, dict]:
         state_updates: Dict[str, Any] = {}
         if not record:
             return None, True, {"existing": True}
 
-        response = self.request_api("POST", request_data=record)
         user = record.get("user") or {}
+        self._ensure_subscribed(user)
+
+        response = self.request_api("POST", request_data=record)
         record_id = user.get("email") or user.get("phone")
         return record_id, response.ok, state_updates
 
